@@ -16,6 +16,8 @@ from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.sampler import Sampler
 from torch.utils.data.sampler import SubsetRandomSampler
 
+from transformers import ViTForImageClassification
+
 from sklearn.metrics import f1_score, precision_recall_fscore_support
 
 IMG_SIZE = 224
@@ -239,10 +241,12 @@ train_loader, val_loader = get_loader(BATCH_SIZE_TRAIN, 0.2)
 
 #model = models.resnet152(weights='DEFAULT')
 #model = models.densenet161(weights='DEFAULT')
-model = models.vit_h_14(weights='IMAGENET1K_SWAG_LINEAR_V1')
+# model = models.vit_h_14(weights='IMAGENET1K_SWAG_LINEAR_V1')
 
-for param in model.parameters():
-    param.requires_grad = False
+# for param in model.parameters():
+#     param.requires_grad = False
+
+model = ViTForImageClassification.from_pretrained("google/vit-base-patch16-224")
 
 #fc layers for ViT
 fc_heads = nn.Sequential(
@@ -334,7 +338,7 @@ class CNN(nn.Module):
 
 #model.classifier = fc_classifier
 #model.fc = fc_layers
-model.heads = fc_heads
+model.classifier = fc_heads
 
 #model.fc = nn.Linear(2048, 14)
 model = model.cuda()
