@@ -375,7 +375,7 @@ def train(
         for data, target in train_loader:
             data, target = data.cuda(), target.cuda()
             optimizer.zero_grad()
-            output = model.forward(data)
+            output = model.forward(data).logits
             loss = criterion(output, target)
             loss.backward()
             optimizer.step()
@@ -425,7 +425,7 @@ def train(
         with torch.no_grad():
             for data, target in valid_loader:
                 data, target = data.cuda(), target.cuda()
-                output = model.forward(data)
+                output = model.forward(data).logits
                 batch_loss = criterion(output, target)
                 valid_loss += batch_loss.item()*data.size(0)
                 pred = torch.sigmoid(output.data) > 0.48
