@@ -250,7 +250,7 @@ model = ViTForImageClassification.from_pretrained("google/vit-base-patch16-224")
 
 #fc layers for ViT
 fc_heads = nn.Sequential(
-        nn.Linear(1280, 640),
+        nn.Linear(768, 640),
         nn.ReLU(),
         nn.BatchNorm1d(640),
         nn.Dropout(0.5),
