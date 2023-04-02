@@ -1,10 +1,14 @@
 import os
+import re
+import csv
 import random
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 from PIL import Image
+from argparse import ArgumentParser
 
 import torch
 import torch.optim as optim
@@ -16,17 +20,57 @@ from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.sampler import Sampler
 from torch.utils.data.sampler import SubsetRandomSampler
 
-from transformers import ViTForImageClassification
+from transformers import ViTForImageClassification, ViTFeatureExtractor
 
-from sklearn.metrics import f1_score, precision_recall_fscore_support
+from sklearn.metrics import f1_score, precision_recall_fscore_support, multilabel_confusion_matrix, classification_report, ConfusionMatrixDisplay
+import seaborn as sns
 
 IMG_SIZE = 224
 NUM_CHANNELS = 3
-NUM_CLASSES = len(os.listdir('./annotations'))
+NUM_CLASSES = 14
 N_EPOCHS = 50
-BATCH_SIZE_TRAIN = 50
+BATCH_SIZE_TRAIN = 250
 BATCH_SIZE_TEST = 50
-LR = 0.003
+LR = 0.0008
+
+
+def parse():
+    par = ArgumentParser()
+
+    par.add_argument(
+        '--model',
+        '-m',
+        dest='model',
+        default='vit',
+        help='Select model to train: vit, resnet, densenet, cnn. Default: vit')
+    
+    par.add_argument(
+        '--train_img_path',
+        '-i',
+        dest='train_dir',
+        default='./train_images',
+        help='Path to training image directory'
+    )
+
+    par.add_argument(
+        '--train_ann_path',
+        '-a',
+        dest='ann_dir',
+        default='./annotations',
+        help='Path to training label directory'
+    )
+
+    par.add_argument(
+        '--test_img_path',
+        '-t',
+        dest='test_dir',
+        default='./test_images',
+        help='Path to test image directory'
+    )
+    
+    return par.parse_args()
+
+args = parse()
 
 class MultilabelBalancedRandomSampler(Sampler):
     """
@@ -116,6 +160,10 @@ class MultilabelBalancedRandomSampler(Sampler):
         return len(self.indices)
 
 def get_labels(labels_dir, images_dir):
+    """
+    Returns the names of the labels and a dictionary
+    where each image index corresponds to a list of its labels.
+    """
     label_names = [os.path.splitext(f)[0] for f in os.listdir(labels_dir)]
     image_indexes = [os.path.splitext(f)[0] for f in os.listdir(images_dir)]
 
@@ -139,15 +187,13 @@ class ImageDataset(Dataset):
             label_dir: str,
             train_transform = None,
             test_transform = None,
-            train_idx = None,
-            val_idx = None
+            train_idx = None
             ) -> None:
         
         self.paths = [os.path.join(image_dir, file_name) for file_name in os.listdir(image_dir)]
         self.train_transform = train_transform
         self.test_transform = test_transform
         self.train_idx = train_idx
-        self.val_idx = val_idx
         self.labels, self.idx_to_label = get_labels(label_dir, image_dir)
         
         class_probabilities = np.random.random([14])
@@ -182,122 +228,52 @@ def get_class_weights(dataset: ImageDataset):
         weights += np.array(dataset.idx_to_label[image_key])
     return torch.tensor([(len(dataset) - value)/value for value in weights])
 
-train_transform = transforms.Compose([
+vit_transform = transforms.Compose([
+    transforms.Resize((IMG_SIZE, IMG_SIZE)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])
+    ])
+crd_transform = transforms.Compose([
+    transforms.Resize((IMG_SIZE, IMG_SIZE)),
     transforms.RandomHorizontalFlip(),
     transforms.RandomVerticalFlip(),
     transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.2),
-    #transforms.RandomResizedCrop(128),
-    transforms.Resize((224, 224)),
-    #transforms.Resize((512, 512)),
-    #transforms.Pad(3),
-    #transforms.CenterCrop((224, 224)),
+    transforms.RandomResizedCrop(IMG_SIZE),
     transforms.RandomRotation(degrees=15),
     transforms.ToTensor(),
-    #transforms.Normalize((0.5,), (0.5,))
     transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])
-])
+    ])
+
+train_transform = vit_transform if args.model == 'vit' else crd_transform
+
 test_transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    #transforms.Resize((512, 512)),
-    #transforms.CenterCrop((224, 224)),
-    #transforms.Pad(3),
+    transforms.Resize((IMG_SIZE, IMG_SIZE)),
     transforms.ToTensor(),
-    #transforms.Normalize((0.5,), (0.5,))
     transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])
-])
-
-def get_loader(batch_size, val_size):
+    ])
+#%%
+dataset = ImageDataset(args.train_dir, args.ann_dir, train_transform, test_transform)
+#%%
+def get_loader(data: ImageDataset, batch_size, val_size):
     
-    indices = list(range(20000))
+    data_len = len(data)
+    indices = list(range(data_len))
+
     np.random.shuffle(indices)
+    split_idx = int(val_size * data_len)
 
-    split_idx = int(np.floor(val_size * 20000))
     train_idx, val_idx = indices[split_idx:], indices[:split_idx]
-    
-    dataset = ImageDataset(
-        './images',
-        './annotations',
-        train_transform,
-        test_transform,
-        train_idx,
-        val_idx
-        )
 
-    train_sampler = MultilabelBalancedRandomSampler(
-        dataset.y,
-        train_idx,
-        class_choice="random"
-    )
-    
-    #train_sampler = SubsetRandomSampler(train_idx)
-    valid_sampler = SubsetRandomSampler(val_idx)
-    
-    train_loader = DataLoader(dataset, batch_size=batch_size, sampler=train_sampler,)
-    valid_loader = DataLoader(dataset, batch_size=batch_size, sampler=valid_sampler,)
-    
+    train_sampler = MultilabelBalancedRandomSampler(dataset.y, train_idx, class_choice="random")
+    data.train_idx = train_idx
+
+    train_loader = DataLoader(dataset, batch_size=batch_size, sampler=train_sampler)
+    valid_loader = DataLoader(dataset, batch_size=batch_size, sampler=SubsetRandomSampler(val_idx))
+
     return train_loader, valid_loader
 
-train_loader, val_loader = get_loader(BATCH_SIZE_TRAIN, 0.2)
+train_loader, val_loader = get_loader(dataset, BATCH_SIZE_TRAIN, 0.2)
 
-#model = models.resnet152(weights='DEFAULT')
-#model = models.densenet161(weights='DEFAULT')
-# model = models.vit_h_14(weights='IMAGENET1K_SWAG_LINEAR_V1')
-
-# for param in model.parameters():
-#     param.requires_grad = False
-
-model = ViTForImageClassification.from_pretrained("google/vit-base-patch16-224")
-
-#fc layers for ViT
-fc_heads = nn.Sequential(
-        nn.Linear(768, 640),
-        nn.ReLU(),
-        nn.BatchNorm1d(640),
-        nn.Dropout(0.5),
-        nn.Linear(640, 320),
-        nn.ReLU(),
-        nn.BatchNorm1d(320),
-        nn.Dropout(0.5),
-        nn.Linear(320, 160),
-        nn.ReLU(),
-        nn.BatchNorm1d(160),
-        nn.Dropout(0.5),
-        nn.Linear(160, 14)
-        )
-
-#fc layers for ResNet152
-fc_layers = nn.Sequential(
-        nn.Linear(2048, 1024),
-        nn.ReLU(),
-        nn.BatchNorm1d(1024),
-        nn.Dropout(0.5),
-        nn.Linear(1024, 512),
-        nn.ReLU(),
-        nn.BatchNorm1d(512),
-        nn.Dropout(0.5),
-        nn.Linear(512, 256),
-        nn.ReLU(),
-        nn.BatchNorm1d(256),
-        nn.Dropout(0.5),
-        nn.Linear(256, 14)
-        )
-
-#fc layers for DenseNet161
-fc_classifier = nn.Sequential(
-        nn.Linear(2208, 1104),
-        nn.ReLU(),
-        nn.BatchNorm1d(1104),
-        nn.Dropout(0.5),
-        nn.Linear(1104, 552),
-        nn.ReLU(),
-        nn.BatchNorm1d(552),
-        nn.Dropout(0.5),
-        nn.Linear(552, 276),
-        nn.ReLU(),
-        nn.BatchNorm1d(276),
-        nn.Dropout(0.5),
-        nn.Linear(276, 14)
-        )
 
 class CNN(nn.Module):
   def __init__(self):
@@ -334,23 +310,97 @@ class CNN(nn.Module):
 
     return x
 
-#model = CNN()
 
-#model.classifier = fc_classifier
-#model.fc = fc_layers
-model.classifier = fc_heads
+def get_model():
+    if args.model == 'cnn':
+        model = CNN()
+        return model
+    
+    if args.model == 'vit':
+        model = ViTForImageClassification.from_pretrained("google/vit-base-patch16-224")
+        for param in model.parameters():
+            param.requires_grad = False
 
-#model.fc = nn.Linear(2048, 14)
-model = model.cuda()
+        fc_heads = nn.Sequential(
+            nn.Linear(768, 640),
+            nn.ReLU(),
+            nn.BatchNorm1d(640),
+            nn.Dropout(0.5),
+            nn.Linear(640, 320),
+            nn.ReLU(),
+            nn.BatchNorm1d(320),
+            nn.Dropout(0.5),
+            nn.Linear(320, 160),
+            nn.ReLU(),
+            nn.BatchNorm1d(160),
+            nn.Dropout(0.5),
+            nn.Linear(160, 14)
+            )
+        
+        model.classifier = fc_heads
 
-weights = get_class_weights(train_loader.dataset).cuda()
+    elif args.model == 'resnet':
+        model = models.resnet152(weights='DEFAULT')
+        for param in model.parameters():
+            param.requires_grad = False
+
+        fc_layers = nn.Sequential(
+            nn.Linear(2048, 1024),
+            nn.ReLU(),
+            nn.BatchNorm1d(1024),
+            nn.Dropout(0.5),
+            nn.Linear(1024, 512),
+            nn.ReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.5),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.BatchNorm1d(256),
+            nn.Dropout(0.5),
+            nn.Linear(256, 14)
+            )
+        
+        model.fc = fc_layers
+            
+    elif args.model == 'densenet':
+        model = models.densenet161(weights='DEFAULT')
+        for param in model.parameters():
+            param.requires_grad = False
+
+        fc_classifier = nn.Sequential(
+            nn.Linear(2208, 1104),
+            nn.ReLU(),
+            nn.BatchNorm1d(1104),
+            nn.Dropout(0.5),
+            nn.Linear(1104, 552),
+            nn.ReLU(),
+            nn.BatchNorm1d(552),
+            nn.Dropout(0.5),
+            nn.Linear(552, 276),
+            nn.ReLU(),
+            nn.BatchNorm1d(276),
+            nn.Dropout(0.5),
+            nn.Linear(276, 14)
+            )
+    
+        model.classifier = fc_classifier
+
+    return model
+
+if torch.cuda.is_available():
+    device = torch.device('cuda')
+else:
+    device = torch.device('cpu')
+
+model = get_model()
+
+model = model.to(device)
+weights = get_class_weights(train_loader.dataset).to(device)
+
 loss = nn.BCEWithLogitsLoss(reduction='mean', pos_weight=weights)
-
-#loss = nn.BCEWithLogitsLoss()
 optimizer = optim.Adam(model.parameters(), lr=LR)
 
 lr_sch = optim.lr_scheduler.LinearLR(optimizer, total_iters=10)
-#lr_sch = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10, eta_min=0.003)
 
 def train(
         n_epochs,
@@ -373,9 +423,12 @@ def train(
         epoch_v_mic_f1, epoch_v_mic_recall, epoch_v_mic_prec = 0.0, 0.0, 0.0
         
         for data, target in train_loader:
-            data, target = data.cuda(), target.cuda()
+            data, target = data.to(device), target.to(device)
             optimizer.zero_grad()
-            output = model.forward(data).logits
+            if args.model == 'vit':
+                output = model(data).logits
+            else:
+                output = model(data)
             loss = criterion(output, target)
             loss.backward()
             optimizer.step()
@@ -413,7 +466,7 @@ def train(
 
         print(f'Epoch: {epoch+1}/{n_epochs}',
         f'Training Loss: {train_loss:.6f}',
-        f'Train acc: {train_correct.float()/(0.8*14*len(train_loader.dataset)):.6f}',
+        f'Train acc: {train_correct.float()/(len(dataset.labels)*len(train_loader.sampler)):.6f}',
         f'Train f1 (micro): {epoch_mic_f1:.6f}',
         f'Train rec (micro): {epoch_mic_recall:.6f}',
         f'Train prec (micro): {epoch_mic_prec:.6f}',
@@ -424,8 +477,11 @@ def train(
         model.eval()
         with torch.no_grad():
             for data, target in valid_loader:
-                data, target = data.cuda(), target.cuda()
-                output = model.forward(data).logits
+                data, target = data.to(device), target.to(device)
+                if args.model == 'vit':
+                    output = model(data).logits
+                else:
+                    output = model(data)
                 batch_loss = criterion(output, target)
                 valid_loss += batch_loss.item()*data.size(0)
                 pred = torch.sigmoid(output.data) > 0.48
@@ -462,7 +518,7 @@ def train(
         
         print(f'Epoch: {epoch+1}/{n_epochs}',
         f'Validation Loss: {valid_loss:.6f}',
-        f'Validation acc: {valid_correct.float()/(0.2*14*len(valid_loader.dataset)):.6f}',
+        f'Validation acc: {valid_correct.float()/(len(dataset.labels)*len(valid_loader.sampler)):.6f}',
         f'Validation f1 (micro): {epoch_v_mic_f1:.6f}',
         f'Validation rec (micro): {epoch_v_mic_recall:.6f}',
         f'Validation prec (micro): {epoch_v_mic_prec:.6f}',
@@ -470,15 +526,15 @@ def train(
         f'Validation rec (macro): {epoch_v_mac_recall:.6f}',
         f'Validation prec (macro): {epoch_v_mac_prec:.6f}')
         
-        if (epoch == 9):
-            save_model(model, epoch+1)
+        #if (epoch == 9):
+        #    save_model(model, epoch+1)
 
         model.train()
     
     return train_loss, valid_loss
 
 def save_model(model, epoch):
-    torch.save(model.state_dict(), f'modell_{epoch}.pt')
+    torch.save(model.state_dict(), f'model_{epoch}.pt')
 
 train_loss, valid_loss = train(
     10,
@@ -489,5 +545,162 @@ train_loss, valid_loss = train(
     optimizer
     )
 
-#test
 
+class TestDataset(Dataset):
+    def __init__(
+            self,
+            image_dir: str,
+            transform = None,
+            ) -> None:
+        
+        self.paths = [os.path.join(image_dir, file_name) for file_name in os.listdir(image_dir)]
+        self.transform = transform
+        
+    def load_image(self, index: int) -> Image.Image:
+        "Opens an image via a path and returns it."
+        image_path = self.paths[index]
+        return Image.open(image_path).convert('RGB')
+ 
+    def __len__(self) -> int:
+        "Returns the total number of samples."
+        return len(self.paths)
+    
+    def __getitem__(self, index: int):
+        "Returns one sample of data."
+        image = self.load_image(index)
+        image_name = os.path.splitext(os.path.basename(self.paths[index]))[0]
+
+        return (self.transform(image), image_name) if self.transform else (image, image_name)
+    
+test_set = TestDataset(
+    args.test_dir,
+    test_transform
+    )
+
+test_loader = DataLoader(test_set, BATCH_SIZE_TEST)
+
+#model.load_state_dict(torch.load('./asd.pt'))
+
+preds, names_list = [], []
+model.eval()
+with torch.no_grad():
+    for data, names in test_loader:
+        data = data.to(device)
+        output = model(data).logits
+        pred = torch.sigmoid(output.data) > 0.48
+        preds.append(pred.cpu().numpy())
+        names_list.append(names)
+
+preds = np.array(preds)
+names_list = np.array(names_list)
+preds = preds.reshape(-1, preds.shape[-1])
+names_list = names_list.reshape(-1, names_list.shape[-1])
+names_list = names_list.flatten()
+
+df1 = pd.DataFrame(preds)
+df1.insert(0,'image',names_list)
+df1 = df1.drop(columns=['Unnamed: 0'])
+df1 = df1*1
+df1['image'].replace(
+    {r"^.{1,2}" : ''},
+    inplace=True,
+    regex=True)
+df1 = df1.sort_values(by='image')
+df1 = df1.rename(columns={
+    'image': 'Filename',
+    '0': 'portrait',
+    '1': 'dog',
+    '2': 'clouds',
+    '3': 'male',
+    '4': 'baby',
+    '5': 'people',
+    '6': 'tree',
+    '7': 'female',
+    '8': 'sea',
+    '9': 'car',
+    '10': 'night',
+    '11': 'river',
+    '12': 'flower',
+    '13': 'bird'
+})
+df1 = pd.concat([
+    df1[['Filename']],
+    df1[df1.columns.difference(['Filename'])
+        ].sort_index(axis=1)],
+        ignore_index=False,
+        axis=1)
+df1 = df1.set_index('Filename')
+df1 = df1.reset_index(drop=False)
+
+df1.to_csv('fin_preds.csv')
+
+with open("./fin_preds.csv", 'r', encoding='utf-8') as csvin, open("./test_set_preds.tsv", 'w', newline='', encoding='utf-8') as tsvout:
+    csvin = csv.reader(csvin)
+    tsvout = csv.writer(tsvout, delimiter='\t')
+ 
+    for row in csvin:
+        tsvout.writerow(row)
+
+
+y_pred, y = [], []
+mis_dict = {name : [] for name in range(len(dataset.labels))}
+with torch.no_grad():
+    model.eval()
+    for X_batch, y_batch in val_loader:
+        X_batch = X_batch.to(device)
+        y_test_pred = model(X_batch).logits
+        pred = (torch.sigmoid(y_test_pred.data) > 0.48).long()
+        
+        pred = pred.cpu().numpy()
+        y_batch = y_batch.cpu().numpy()
+        
+        mis = y_batch != pred
+        for i in range(len(mis)):
+          for j in range(len(mis[0])):
+            if mis[i, j] == 1:
+              mis_dict[j].append((X_batch[i].cpu().numpy(),
+                                  y_batch[i][j]))
+        
+        for i in pred: y_pred.append(i)
+        for i in y_batch: y.append(i)
+
+y = np.array(y)
+y_pred = np.array(y_pred)
+
+m = multilabel_confusion_matrix(y, y_pred)
+
+f, axes = plt.subplots(2, 7, figsize=(30, 10))
+axes = axes.ravel()
+
+for i in range(14):
+    disp = ConfusionMatrixDisplay(m[i])
+    disp.plot(ax=axes[i], values_format='')
+    disp.ax_.set_title(f'class {dataset.labels[i]}')
+    disp.im_.colorbar.remove()
+
+plt.subplots_adjust(wspace=0.2, hspace=0.1)
+plt.show()
+
+invTrans = transforms.Compose([
+    transforms.Normalize(mean=[0.,0.,0.], std=[1/0.229,1/0.224,1/0.225]),
+    transforms.Normalize(mean=[-0.485,-0.456,-0.406], std=[1.,1.,1.]),
+    ])
+
+test_labels = ['male', 'female', 'people', 'portrait']
+for label in test_labels:
+    f, axes = plt.subplots(2, 2, figsize=(5, 5))
+    axes = axes.ravel()
+
+    index = dataset.labels.index(label)
+    examples = [random.randint(0, len(mis_dict[index])) for i in range(4)]
+    for i in range(4):
+        im = torch.from_numpy(mis_dict[index][examples[i]][0])
+        axes[i].imshow(invTrans(im).permute(1, 2, 0))
+
+        cl = mis_dict[index][examples[i]][1]
+        axes[i].set_title('False Positive' if cl == 0 else 'False Negative')
+        axes[i].axis('off')
+
+    plt.subplots_adjust(wspace=0.01, hspace=0.2)
+    f.suptitle(f"Class {label}")
+    plt.show()
