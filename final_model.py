@@ -643,7 +643,7 @@ with open("./fin_preds.csv", 'r', encoding='utf-8') as csvin, open("./test_set_p
 
 
 y_pred, y = [], []
-mis_dict = {name : [] for name in range(dataset.labels)}
+mis_dict = {name : [] for name in range(len(dataset.labels))}
 with torch.no_grad():
     model.eval()
     for X_batch, y_batch in val_loader:
