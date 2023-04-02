@@ -27,8 +27,7 @@ import seaborn as sns
 
 IMG_SIZE = 224
 NUM_CHANNELS = 3
-NUM_CLASSES = 14
-N_EPOCHS = 50
+N_EPOCHS = 10
 BATCH_SIZE_TRAIN = 250
 BATCH_SIZE_TEST = 50
 LR = 0.0008
@@ -180,7 +179,6 @@ def get_labels(labels_dir, images_dir):
     return label_names, image_labels
 
 class ImageDataset(Dataset):
-    
     def __init__(
             self,
             image_dir: str,
@@ -233,6 +231,7 @@ vit_transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])
     ])
+
 crd_transform = transforms.Compose([
     transforms.Resize((IMG_SIZE, IMG_SIZE)),
     transforms.RandomHorizontalFlip(),
@@ -255,7 +254,11 @@ test_transform = transforms.Compose([
 dataset = ImageDataset(args.train_dir, args.ann_dir, train_transform, test_transform)
 #%%
 def get_loader(data: ImageDataset, batch_size, val_size):
-    
+    """ 
+    Returns the training and validation loader of the given multi-label dataset.
+    Uses MultilabelBalancedRandomSampler to balanced the data.
+    """
+
     data_len = len(data)
     indices = list(range(data_len))
 
@@ -309,7 +312,6 @@ class CNN(nn.Module):
     x = self.lin_layer_2(x)
 
     return x
-
 
 def get_model():
     if args.model == 'cnn':
@@ -413,6 +415,7 @@ def train(
 
     for epoch in range(n_epochs):
         model.train()
+
         train_correct = 0
         valid_correct = 0
         train_loss = 0.0
@@ -424,6 +427,7 @@ def train(
         
         for data, target in train_loader:
             data, target = data.to(device), target.to(device)
+
             optimizer.zero_grad()
             if args.model == 'vit':
                 output = model(data).logits
@@ -431,8 +435,10 @@ def train(
                 output = model(data)
             loss = criterion(output, target)
             loss.backward()
+
             optimizer.step()
             lr_sch.step()
+
             train_loss += loss.item()*data.size(0)
             pred = torch.sigmoid(output.data) > 0.48
             train_correct += pred.eq(target.data.view_as(pred)).sum()
@@ -478,11 +484,13 @@ def train(
         with torch.no_grad():
             for data, target in valid_loader:
                 data, target = data.to(device), target.to(device)
+
                 if args.model == 'vit':
                     output = model(data).logits
                 else:
                     output = model(data)
                 batch_loss = criterion(output, target)
+
                 valid_loss += batch_loss.item()*data.size(0)
                 pred = torch.sigmoid(output.data) > 0.48
                 valid_correct += pred.eq(target.data.view_as(pred)).sum()
@@ -536,16 +544,10 @@ def train(
 def save_model(model, epoch):
     torch.save(model.state_dict(), f'model_{epoch}.pt')
 
-train_loss, valid_loss = train(
-    10,
-    model,
-    train_loader,
-    val_loader,
-    loss,
-    optimizer
-    )
+train_loss, valid_loss = train(N_EPOCHS, model, train_loader, val_loader, loss, optimizer)
 
 
+# To generate test answers
 class TestDataset(Dataset):
     def __init__(
             self,
@@ -623,6 +625,7 @@ df1 = df1.rename(columns={
     '12': 'flower',
     '13': 'bird'
 })
+
 df1 = pd.concat([
     df1[['Filename']],
     df1[df1.columns.difference(['Filename'])
@@ -641,7 +644,7 @@ with open("./fin_preds.csv", 'r', encoding='utf-8') as csvin, open("./test_set_p
     for row in csvin:
         tsvout.writerow(row)
 
-
+# To generate plots for error analysis
 y_pred, y = [], []
 mis_dict = {name : [] for name in range(len(dataset.labels))}
 with torch.no_grad():
