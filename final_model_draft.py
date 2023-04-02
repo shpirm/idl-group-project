@@ -160,6 +160,10 @@ class MultilabelBalancedRandomSampler(Sampler):
         return len(self.indices)
 
 def get_labels(labels_dir, images_dir):
+    """
+    Returns the names of the labels and a dictionary
+    where each image index corresponds to a list of its labels.
+    """
     label_names = [os.path.splitext(f)[0] for f in os.listdir(labels_dir)]
     image_indexes = [os.path.splitext(f)[0] for f in os.listdir(images_dir)]
 
@@ -421,7 +425,10 @@ def train(
         for data, target in train_loader:
             data, target = data.to(device), target.to(device)
             optimizer.zero_grad()
-            output = model.forward(data)
+            if args.model == 'vit':
+                output = model(data).logits
+            else:
+                output = model(data)
             loss = criterion(output, target)
             loss.backward()
             optimizer.step()
@@ -471,7 +478,10 @@ def train(
         with torch.no_grad():
             for data, target in valid_loader:
                 data, target = data.to(device), target.to(device)
-                output = model.forward(data)
+                if args.model == 'vit':
+                    output = model(data).logits
+                else:
+                    output = model(data)
                 batch_loss = criterion(output, target)
                 valid_loss += batch_loss.item()*data.size(0)
                 pred = torch.sigmoid(output.data) > 0.48
